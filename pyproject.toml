@@ -3,6 +3,7 @@ name = "reproducible-builds"
 version = "0.1.0"
 description = "Reproducible builds for the python package ecosystem"
 authors = ["Martin Carnogursky <admin@sourcecode.ai>"]
+homepage = "https://github.com/SourceCode-AI/reproducible-python-builds"
 
 classifiers = [
     "Topic :: Software Development :: Build Tools",
@@ -12,6 +13,8 @@ classifiers = [
 packages = [
     { include = "reproducible_builds" }
 ]
+
+include = ["README.md", "pyproject.toml", "poetry.lock"]
 
 
 [tool.poetry.dependencies]

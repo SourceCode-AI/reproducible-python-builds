@@ -1,10 +1,10 @@
 import logging
+import shutil
 from pathlib import Path
 
 import click
 
 from . import utils
-from . import common
 from . import downloader
 from . import docker_environment
 from . import repacker
@@ -74,6 +74,10 @@ def repack(filename):
     """
     pth = Path(filename)
     pkg = repacker.Package.from_file(pth)
+
+    repack_dir = pkg.repack_dir
+    if repack_dir.exists() and click.confirm(f"Target directory `{repack_dir}` already exists, do you want to remove it and continue?", abort=True):
+        shutil.rmtree(repack_dir)
 
     repacker.repack(pkg)
 
