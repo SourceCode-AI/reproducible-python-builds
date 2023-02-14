@@ -2,6 +2,8 @@ import gzip
 import subprocess
 import shutil
 import logging
+import tempfile
+import contextlib
 from pathlib import Path
 
 import requests
@@ -38,3 +40,16 @@ def check_command(bin: str, *args):
 
     return True
 
+
+@contextlib.contextmanager
+def with_tmp_dir(original: Path, modified: Path) -> Path:
+    with tempfile.TemporaryDirectory(prefix="reproducible-builds-tmpdir-") as tdir:
+        tdir_pth = Path(tdir)
+        orig_dir = (tdir_pth / "original")
+        orig_dir.mkdir()
+        mod_dir = (tdir_pth / "modified")
+        mod_dir.mkdir()
+        (tdir_pth / "output").mkdir()
+        shutil.copy(original, (orig_dir/original.name))
+        shutil.copy(modified, (mod_dir/modified.name))
+        yield tdir

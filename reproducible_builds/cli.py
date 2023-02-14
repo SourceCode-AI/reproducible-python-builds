@@ -8,6 +8,7 @@ from . import utils
 from . import downloader
 from . import docker_environment
 from . import repacker
+from . import common
 
 
 CWD = Path.cwd()
@@ -73,7 +74,7 @@ def repack(filename):
     Repack and generate data for the concrete python package
     """
     pth = Path(filename)
-    pkg = repacker.Package.from_file(pth)
+    pkg = common.Package.from_file(pth)
 
     repack_dir = pkg.repack_dir
     if repack_dir.exists() and click.confirm(f"Target directory `{repack_dir}` already exists, do you want to remove it and continue?", abort=True):

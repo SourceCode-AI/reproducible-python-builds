@@ -1,140 +1,37 @@
 from __future__ import annotations
 
-import enum
-import dataclasses
+import hashlib
 import json
 import tempfile
-import tarfile
-import zipfile
 import logging
 import time
 from pathlib import Path
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 import traceback
 import typing as t
 
 from . import docker_environment
 from . import common
+from . import postprocessing
+from .tools import aura_diff
 
 
 logger = logging.getLogger(__name__)
 
 
-@enum.unique
-class PackageType(enum.Enum):
-    SDIST = "sdist"
-    WHEEL = "wheel"
 
-    @staticmethod
-    def detect(filename: str) -> t.Optional[PackageType]:
-        if filename.endswith(".whl"):
-            return PackageType.WHEEL
-        elif filename.endswith(".tar.gz"):
-            return PackageType.SDIST
-        else:
-            return None
-
-
-@dataclasses.dataclass
-class Package:
-    package_type: PackageType
-    path: Path
-
-    @classmethod
-    def from_file(cls, path: Path) -> Package:
-        if not (pkg_type:=PackageType.detect(path.name)):
-            raise ValueError(f"`{path.name}` does not appear to be a valid/supported package file")
-
-        return cls(
-            package_type=pkg_type,
-            path=path
-        )
-
-    @classmethod
-    def enumerate(cls, location: Path):
-        for pypi_stats in location.glob("*/pypi_metadata.json"):
-            metadata = json.loads(pypi_stats.read_text())
-
-            for version, releases in metadata["releases"].items():
-                version_path = pypi_stats.parent / version
-                if not version_path.exists():
-                    continue
-
-                for release in releases:
-                    pkg_path = version_path / release["filename"]
-                    if not pkg_path.is_file():
-                        continue
-                    elif not (pkg_type:=PackageType.detect(release["filename"])):
-                        continue
-                    yield cls(
-                        package_type=pkg_type,
-                        path = pkg_path
-                    )
-
-    @property
-    def repack_dir(self) -> Path:
-        name = self.path.name.replace(".", "_") + "_repacked"
-        return (self.path.parent / name).absolute()
-
-    def find_sdist(self) -> t.Optional[Package]:
-        location = self.path.parent
-
-        for pkg in location.glob("*"):
-            pkg_type = PackageType.detect(pkg.name)
-
-            if pkg_type == PackageType.SDIST:
-                return Package(package_type=pkg_type, path=pkg)
-
-    def normalize(self, dest: Path):
-        if self.path.name.endswith(".whl"):
-            src_arch = zipfile.ZipFile(self.path.absolute(), "r")
-            dest_arch = zipfile.ZipFile(dest, "w")
-            common.normalize_zip(in_zip=src_arch, out_zip=dest_arch)
-            dest_arch.close()
-        else:
-            src_arch = tarfile.open(self.path.absolute(), "r:*")
-            dest_arch = tarfile.open(dest, "w:gz")
-            common.normalize_tar(in_tar=src_arch, out_tar=dest_arch)
-            dest_arch.close()
-
-    @contextmanager
-    def as_source(self):
-        with tempfile.TemporaryDirectory(prefix="reproducible_src_dir_") as tmpdir:
-            logger.info(f"Created temporary directory for sources: `{tmpdir}`")
-            tmp_path = Path(tmpdir)
-
-            if self.path.name.endswith(".tar.gz"):
-                with tarfile.open(self.path, "r:*") as archive:
-                    logger.info(f"Extracting `{self.path.name}` to `{tmpdir}`")
-                    archive.extractall(tmpdir)
-
-                    for x in tmp_path.glob("*/PKG-INFO"):
-                        yield x.parent
-                        break
-            elif self.path.name.endswith(".whl"):
-                archive = zipfile.ZipFile(self.path, "r")
-                logger.info(f"Extracting `{self.path.name}` to `{tmpdir}`")
-                archive.extractall(tmpdir)
-                yield tmpdir
-            else:
-                raise ValueError("Unknown archive format for this file")
-
-    def __str__(self):
-        return self.path.name
-
-
-def repack(package: Package, source_dir=None):
+def repack(package: common.Package, source_dir=None):
     start = time.monotonic()
     if source_dir is not None:
         logger.info(f"Source dir for `{str(package)}` already provided, skipping")
         cm = nullcontext(source_dir)
-    elif package.package_type == PackageType.WHEEL:
+    elif package.package_type == common.PackageType.WHEEL:
         sdist = package.find_sdist()
         if not sdist:
             raise FileNotFoundError("Could not found an appropriate sdist for rebuilding the package")
         logger.info(f"Found `{str(sdist)}` as source for repacking `{str(package)}")
         cm = sdist.as_source()
-    elif package.package_type == PackageType.SDIST:
+    elif package.package_type == common.PackageType.SDIST:
         logger.info(f"Using itself (sdist) to repack `{package}")
         cm = package.as_source()
     else:
@@ -155,7 +52,7 @@ def repack(package: Package, source_dir=None):
 
         existing_files = set(x.name for x in repack_dir.iterdir() if x.is_file())
 
-        if package.package_type == PackageType.SDIST:
+        if package.package_type == common.PackageType.SDIST:
             build_mode = "--sdist"
         else:
             build_mode = "--wheel"
@@ -185,9 +82,10 @@ def repack(package: Package, source_dir=None):
             return False
 
 
-        new_pkg = Package.from_file(new_package_pth)
+        new_pkg = common.Package.from_file(new_package_pth)
 
         common.run_diffoscope(original=package.path, target=new_package_pth)
+        aura_diff.run_aura_diff(original=package.path, target=new_package_pth)
 
         with tempfile.TemporaryDirectory(prefix="normalized_reproducible_packages_") as norm_temp_dir:
             norm_temp_pth = Path(norm_temp_dir)
@@ -199,6 +97,10 @@ def repack(package: Package, source_dir=None):
             package.normalize(orig_archive_pth)
             logger.info(f"Normalizing repacked package `{pkg_name}`")
             new_pkg.normalize(repacked_archive_pth)
+
+            original_normalized_md5 = hashlib.md5(orig_archive_pth.read_bytes()).hexdigest()
+            repacked_normalized_md5 = hashlib.md5(repacked_archive_pth.read_bytes()).hexdigest()
+
             logger.info(f"Diffing normalized packages `{pkg_name}`")
             common.run_diffoscope(
                 original=orig_archive_pth,
@@ -206,14 +108,35 @@ def repack(package: Package, source_dir=None):
                 out_dir=repack_dir,
                 suffix="_normalized",
             )
+            aura_diff.run_aura_diff(
+                original=orig_archive_pth,
+                target=repacked_archive_pth,
+                target_path=repack_dir,
+                suffix="_normalized"
+            )
+
+        original_md5 = hashlib.md5(package.path.read_bytes()).hexdigest()
+        repacked_md5 = hashlib.md5(new_package_pth.read_bytes()).hexdigest()
+
+        checksums = {
+            "original": original_md5,
+            "repacked": repacked_md5,
+            "normalized_original": original_normalized_md5,
+            "normalized_repacked": repacked_normalized_md5
+        }
+        with (new_package_pth.parent / "checksums.json").open("w") as fd:
+            fd.write(json.dumps(checksums))
+
+    results = common.ReproducibleResults.from_package(package)
+    postprocessing.combine_results(results)
 
     end = time.monotonic()
-    logger.info(f"Repacking of {pkg_name} finished in {(end-start):.2f} s")
+    logger.info(f"Repacking and processing of {pkg_name} finished in {(end-start):.2f} s")
     return True
 
 
 def repack_all(dataset_dir: Path):
-    for idx, pkg in enumerate(Package.enumerate(dataset_dir)):
+    for idx, pkg in enumerate(common.Package.enumerate(dataset_dir)):
         repack_dir = pkg.repack_dir
         # Skip if the repacked archive already exists
         if (repack_dir / pkg.path.name).exists():
